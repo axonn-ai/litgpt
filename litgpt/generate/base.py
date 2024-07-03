@@ -150,7 +150,7 @@ def generate(
 @torch.inference_mode()
 def main(
     checkpoint_dir: Path,
-    prompt: str = "What food do llamas eat?",
+    prompt: str = "Write a matpotlib program to draw a stacked bar chart",
     *,
     num_samples: int = 1,
     max_new_tokens: int = 50,
@@ -212,7 +212,10 @@ def main(
         plugins = BitsandbytesPrecision(quantize[4:], dtype)
         precision = None
 
-    fabric = L.Fabric(devices=1, precision=precision, plugins=plugins)
+    from axonn.lightning import AxonnStrategy
+    strategy = AxonnStrategy(G_intra_r=4)
+    fabric = L.Fabric(devices=4, precision=precision, plugins=plugins, strategy=strategy)
+    fabric.launch()
 
     check_valid_checkpoint_dir(checkpoint_dir)
     config = Config.from_file(checkpoint_dir / "model_config.yaml")
@@ -233,7 +236,7 @@ def main(
     fabric.print(f"Loading model {str(checkpoint_path)!r} with {config.__dict__}", file=sys.stderr)
     t0 = time.perf_counter()
     with fabric.init_module(empty_init=True):
-        model = GPT(config)
+        model = GPT(config, use_axonn_linear=True)
     fabric.print(f"Time to instantiate model: {time.perf_counter() - t0:.02f} seconds.", file=sys.stderr)
     with fabric.init_tensor():
         # set the max_seq_length to limit the memory usage to what we need

@@ -15,14 +15,15 @@ from typing_extensions import Self
 
 from litgpt.config import Config
 
+from axonn.intra_layer import Linear
 
 class GPT(nn.Module):
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, use_axonn_linear=False) -> None:
         super().__init__()
         assert config.padded_vocab_size is not None
+        config.use_axonn_linear = use_axonn_linear
         self.config = config
 
-        self.lm_head = nn.Linear(config.n_embd, config.padded_vocab_size, bias=config.lm_head_bias)
         self.transformer = nn.ModuleDict(
             dict(
                 wte=nn.Embedding(config.padded_vocab_size, config.n_embd),
@@ -30,6 +31,12 @@ class GPT(nn.Module):
                 ln_f=config.norm_class(config.n_embd, eps=config.norm_eps),
             )
         )
+
+        if use_axonn_linear:
+            self.lm_head = Linear(config.n_embd, config.padded_vocab_size, bias=config.lm_head_bias)
+        else:
+            self.lm_head = nn.Linear(config.n_embd, config.padded_vocab_size, bias=config.lm_head_bias)
+        
         self.max_seq_length = self.config.block_size
         self.mask_cache: Optional[torch.Tensor] = None
 
@@ -193,14 +200,31 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         shape = (config.n_head + 2 * config.n_query_groups) * config.head_size
         # key, query, value projections for all heads, but in a batch
-        self.attn = nn.Linear(config.n_embd, shape, bias=config.bias)
+        if config.use_axonn_linear:
+            self.attn = Linear(config.n_embd, shape, bias=config.bias, expert_mode=True)
+        else:
+            self.attn = nn.Linear(config.n_embd, shape, bias=config.bias)
         # output projection
         # if `head_size` is explicitly specified in the config, `n_emd` might not be equal to `head_size * n_head`
-        self.proj = nn.Linear(config.head_size * config.n_head, config.n_embd, bias=config.bias)
+        if config.use_axonn_linear:
+            self.proj = Linear(config.head_size * config.n_head, config.n_embd, bias=config.bias, expert_mode=True, transpose=True)
+        else:
+            self.proj = nn.Linear(config.head_size * config.n_head, config.n_embd, bias=config.bias)
         # disabled by default
         self.kv_cache: Optional[KVCache] = None
 
         self.config = config
+        if config.use_axonn_linear:
+            # adjust number of heads
+            from copy import deepcopy
+            from axonn import axonn as ax
+            self.config = deepcopy(self.config)
+            attention_world_size = ax.config.G_intra_r
+            assert self.config.n_head % attention_world_size == 0
+            self.config.n_head //= attention_world_size
+            assert self.config.n_query_groups % attention_world_size == 0
+            self.config.n_query_groups //= attention_world_size
+
 
     def forward(
         self,
@@ -287,8 +311,12 @@ class CausalSelfAttention(nn.Module):
 class GptNeoxMLP(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self.fc = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
-        self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
+        if config.use_axonn_linear:
+            self.fc = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias, expert_mode=True)
+            self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias, expert_mode=True, transpose=True)
+        else:
+            self.fc = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+            self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
 
         self.config = config
 
@@ -301,9 +329,14 @@ class GptNeoxMLP(nn.Module):
 class LLaMAMLP(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
-        self.fc_1 = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
-        self.fc_2 = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
-        self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
+        if config.use_axonn_linear:
+            self.fc_1 = Linear(config.n_embd, config.intermediate_size, bias=config.bias, expert_mode=True)
+            self.fc_2 = Linear(config.n_embd, config.intermediate_size, bias=config.bias, expert_mode=True)
+            self.proj = Linear(config.intermediate_size, config.n_embd, bias=config.bias, expert_mode=True, transpose=True)
+        else:
+            self.fc_1 = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+            self.fc_2 = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
+            self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
 
         self.config = config
 
