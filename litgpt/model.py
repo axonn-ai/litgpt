@@ -201,13 +201,13 @@ class CausalSelfAttention(nn.Module):
         shape = (config.n_head + 2 * config.n_query_groups) * config.head_size
         # key, query, value projections for all heads, but in a batch
         if config.use_axonn_linear:
-            self.attn = Linear(config.n_embd, shape, bias=config.bias, expert_mode=True)
+            self.attn = Linear(config.n_embd, shape, bias=config.bias, expert_mode=False)
         else:
             self.attn = nn.Linear(config.n_embd, shape, bias=config.bias)
         # output projection
         # if `head_size` is explicitly specified in the config, `n_emd` might not be equal to `head_size * n_head`
         if config.use_axonn_linear:
-            self.proj = Linear(config.head_size * config.n_head, config.n_embd, bias=config.bias, expert_mode=True, transpose=True)
+            self.proj = Linear(config.head_size * config.n_head, config.n_embd, bias=config.bias, expert_mode=False, transpose=True)
         else:
             self.proj = nn.Linear(config.head_size * config.n_head, config.n_embd, bias=config.bias)
         # disabled by default
@@ -312,8 +312,8 @@ class GptNeoxMLP(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
         if config.use_axonn_linear:
-            self.fc = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias, expert_mode=True)
-            self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias, expert_mode=True, transpose=True)
+            self.fc = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias, expert_mode=False)
+            self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias, expert_mode=False, transpose=True)
         else:
             self.fc = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
             self.proj = nn.Linear(config.intermediate_size, config.n_embd, bias=config.bias)
@@ -330,9 +330,9 @@ class LLaMAMLP(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
         if config.use_axonn_linear:
-            self.fc_1 = Linear(config.n_embd, config.intermediate_size, bias=config.bias, expert_mode=True)
-            self.fc_2 = Linear(config.n_embd, config.intermediate_size, bias=config.bias, expert_mode=True)
-            self.proj = Linear(config.intermediate_size, config.n_embd, bias=config.bias, expert_mode=True, transpose=True)
+            self.fc_1 = Linear(config.n_embd, config.intermediate_size, bias=config.bias, expert_mode=False)
+            self.fc_2 = Linear(config.n_embd, config.intermediate_size, bias=config.bias, expert_mode=False)
+            self.proj = Linear(config.intermediate_size, config.n_embd, bias=config.bias, expert_mode=False, transpose=True)
         else:
             self.fc_1 = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)
             self.fc_2 = nn.Linear(config.n_embd, config.intermediate_size, bias=config.bias)

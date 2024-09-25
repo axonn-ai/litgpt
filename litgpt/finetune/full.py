@@ -1,4 +1,6 @@
 # Copyright Lightning AI. Licensed under the Apache License 2.0, see LICENSE file.
+from mpi4py import MPI
+MPI.Init()
 import dataclasses
 import math
 import os
@@ -36,6 +38,19 @@ from litgpt.utils import (
     save_hyperparameters,
 )
 
+@torch.no_grad()
+def global_collate(input_ids, targets, pad_idx=0, ignore_idx=-100):
+    tensors = [input_ids, targets]
+    paddings = [pad_idx, ignore_idx]
+    padded_tensors = []
+    for tensor, padding in zip(tensors, paddings):
+        local_sq = torch.tensor(tensor.shape[1], device="cuda")
+        torch.distributed.all_reduce(local_sq, torch.distributed.ReduceOp.MAX)
+        global_sq = local_sq 
+        padded_tensor = torch.full((tensor.shape[0], global_sq), fill_value=padding, device="cuda")
+        padded_tensor[:, :tensor.shape[1]].copy_(tensor)
+        padded_tensors.append(padded_tensor)
+    return padded_tensors
 
 def setup(
     checkpoint_dir: Path,
@@ -56,7 +71,7 @@ def setup(
     ),
     eval: EvalArgs = EvalArgs(interval=600, max_new_tokens=100, max_iters=100),
     optimizer: Union[str, Dict] = "AdamW",
-    logger_name: Literal["wandb", "tensorboard", "csv"] = "csv",
+    logger_name: Literal["wandb", "tensorboard", "csv"] = "wandb",
     seed: int = 1337,
     strategy: Literal["axonn", "fsdp"] = "fsdp"
 ) -> None:
@@ -68,7 +83,7 @@ def setup(
             /teamspace/jobs/<job-name>/share.
         precision: The precision to use for finetuning. Possible choices: "bf16-true", "bf16-mixed", "32-true".
         devices: How many devices/GPUs per node to use
-        nodes: How many nodes to use
+        num_nodes: How many nodes to use
         resume: Path to a checkpoint directory to resume from in case training was interrupted, or ``True`` to resume
             from the latest checkpoint in ``out_dir``. An error will be raised if no checkpoint is found. Passing
             ``'auto'`` will resume from the latest checkpoint but not error if no checkpoint exists.
@@ -99,18 +114,16 @@ def setup(
         if strategy == "fsdp":
             strategy = FSDPStrategy(
                 auto_wrap_policy={Block},
-                activation_checkpointing_policy={Block},
+                #activation_checkpointing_policy={Block},
                 state_dict_type="full",
                 limit_all_gathers=True,
                 cpu_offload=False,
             )
         elif strategy == "axonn":
-            try:
-                from mpi4py import MPI
-            except ImportError:
-                pass
             from axonn.lightning import AxonnStrategy
-            strategy = AxonnStrategy(G_intra_d=num_nodes * devices)
+            strategy = AxonnStrategy(G_intra_r=num_nodes * devices, 
+                                     #activation_checkpointing_policy={Block},
+                                     overlap_communication=True)
     else:
         strategy = "auto"
 
@@ -146,6 +159,7 @@ def main(
 
     checkpoint_path = checkpoint_dir / "lit_model.pth"
     with fabric.init_module(empty_init=(devices > 1)):
+        config.use_axonn_linear=False
         model = GPT(config)
 
     fabric.print(f"Number of trainable parameters: {num_parameters(model, requires_grad=True):,}")
@@ -247,6 +261,7 @@ def fit(
         iter_t0 = time.perf_counter()
         batch = next(train_iterator)
         input_ids, targets = batch["input_ids"], batch["labels"]
+        input_ids, targets = global_collate(input_ids, targets)
 
         is_accumulating = state["iter_num"] % train.gradient_accumulation_iters(devices) != 0
         with fabric.no_backward_sync(model, enabled=is_accumulating):
@@ -258,7 +273,7 @@ def fit(
         running_loss.update(loss.detach())
 
         if not is_accumulating:
-            fabric.clip_gradients(model, optimizer, 1.0)
+            fabric.clip_gradients(model, optimizer, max_norm=1.0)
             optimizer.step()
             optimizer.zero_grad()
             scheduler.step()
@@ -321,6 +336,7 @@ def validate(fabric: L.Fabric, model: GPT, val_dataloader: DataLoader, eval: Eva
         if k >= eval.max_iters:
             break
         input_ids, targets = batch["input_ids"], batch["labels"]
+        input_ids, targets = global_collate(input_ids, targets)
         logits = model(input_ids)
         losses[k] = chunked_cross_entropy(logits[..., :-1, :], targets[..., 1:], chunk_size=0)
 
