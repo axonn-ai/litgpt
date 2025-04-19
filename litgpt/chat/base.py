@@ -1,5 +1,10 @@
 # Copyright Lightning AI. Licensed under the Apache License 2.0, see LICENSE file.
 
+try:
+    from mpi4py import MPI
+except ImportError:
+    pass
+from axonn.lightning import AxonnStrategy
 import sys
 import time
 from pathlib import Path
@@ -142,23 +147,26 @@ def process_prompt(prompt, model, tokenizer, prompt_style, fabric, temperature, 
 
 def interact(multiline, model, tokenizer, prompt_style, fabric, temperature, top_k, top_p, stop_tokens):
     while True:
-        try:
-            if not multiline:
-                prompt = input(">> Prompt: ")
-            else:
-                print(">> Prompt: (Type '!submit' on a new line to end input).")
-                prompt_lines = []
-                while True:
-                    line = input()
-                    if line.strip().lower() in ("!submit", "!quit", "!exit"):
-                        break
-                    prompt_lines.append(line)
-                prompt = "\n".join(prompt_lines)
+        prompt = None
+        if fabric.global_rank == 0:
+            try:
+                if not multiline:
+                    prompt = input(">> Prompt: ")
+                else:
+                    print(">> Prompt: (Type '!submit' on a new line to end input).")
+                    prompt_lines = []
+                    while True:
+                        line = input()
+                        if line.strip().lower() in ("!submit", "!quit", "!exit"):
+                            break
+                        prompt_lines.append(line)
+                    prompt = "\n".join(prompt_lines)
 
-        except KeyboardInterrupt:
-            break
+            except KeyboardInterrupt:
+                break
 
-        prompt = prompt.lower().strip()
+            prompt = prompt.lower().strip()
+        prompt = fabric.broadcast(prompt, src=0)
         if not prompt or prompt in ("!quit", "!exit"):
             break
 
@@ -219,7 +227,9 @@ def main(
         plugins = BitsandbytesPrecision(quantize[4:], dtype)
         precision = None
 
-    fabric = L.Fabric(devices=1, precision=precision, plugins=plugins)
+    strategy = AxonnStrategy(G_intra_r=4)
+    fabric = L.Fabric(devices=4, precision=precision, plugins=plugins, strategy=strategy)
+    fabric.launch()
 
     checkpoint_path = checkpoint_dir / "lit_model.pth"
     check_file_size_on_cpu_and_warn(checkpoint_path, fabric.device)
@@ -233,9 +243,12 @@ def main(
     config = Config.from_file(checkpoint_dir / "model_config.yaml")
 
     with fabric.init_module(empty_init=True):
-        model = GPT(config)
+        model = GPT(config, use_axonn_linear=True)
         # enable the kv cache
+    
+    with fabric.init_tensor():
         model.set_kv_cache(batch_size=1)
+    
     load_checkpoint(fabric, model, checkpoint_path)
     model.eval()
 
